@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PhysiTwin - 物理 AI 空间手势数字孪生控制台</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        #canvas-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+
+        /* 隐藏的原始视频输入 */
+        #input-video {
+            display: none;
+        }
+
+        /* 赛博朋克风 HUD 工业级仪表盘 UI 层 */
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            color: rgba(255, 255, 255, 0.9);
+            pointer-events: none;
+            user-select: none;
+            background: rgba(10, 15, 30, 0.6);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(0, 255, 204, 0.3);
+            border-radius: 12px;
+            padding: 16px 20px;
+            box-shadow: 0 0 20px rgba(0, 255, 204, 0.15);
+            max-width: 340px;
+        }
+
+        h1 {
+            margin: 0 0 8px 0;
+            font-size: 1.2rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: #00ffcc;
+            text-shadow: 0 0 10px rgba(0, 255, 204, 0.6);
+        }
+
+        .instruction {
+            font-size: 0.85rem;
+            line-height: 1.5;
+            color: rgba(255, 255, 255, 0.75);
+        }
+
+        .instruction b {
+            color: #ffaa00;
+        }
+
+        .status-container {
+            margin-top: 12px;
+            padding-top: 8px;
+            border-top: 1px solid rgba(255, 255, 255, 0.15);
+        }
+
+        .status {
+            font-size: 0.9rem;
+            font-weight: bold;
+            color: #00ffcc;
+            text-shadow: 0 0 8px rgba(0, 255, 204, 0.4);
+        }
+
+        .hardware-sync {
+            margin-top: 6px;
+            font-size: 0.75rem;
+            color: #ffaa00;
+        }
+
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 16px;
+            z-index: 20;
+            text-align: center;
+            background: rgba(10, 15, 30, 0.9);
+            padding: 30px;
+            border-radius: 12px;
+            border: 1px solid #00ffcc;
+            box-shadow: 0 0 30px rgba(0, 255, 204, 0.3);
+            max-width: 400px;
+        }
+        
+        /* 摄像头预览小窗 */
+        #webcam-preview {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 160px;
+            height: 120px;
+            z-index: 10;
+            border: 2px solid rgba(0, 255, 204, 0.4);
+            border-radius: 8px;
+            opacity: 0.8;
+            transform: scaleX(-1); /* 镜像翻转 */
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.8);
+        }
+    </style>
+
+    <!-- 1. MediaPipe 依赖 -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <!-- 2. Three.js Import Map -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <div id="loading">
+        正在初始化 PhysiTwin 核心...<br>
+        <span style="font-size:13px; opacity:0.7">正在请求摄像头权限，请点击“允许”</span>
+    </div>
+
+    <div id="ui-layer">
+        <h1>PhysiTwin Console</h1>
+        <div class="instruction">
+            ✋ <b>张开</b>: 相机靠近 | ✊ <b>握拳</b>: 相机拉远<br>
+            🔄 <b>斜手/转腕</b>: 环绕旋转 | 👍 <b>点赞</b>: 重置视角<br>
+            👌 <b>OK</b>: 超新星大爆炸 | ✌️ <b>剪刀手</b>: 切换能量色彩
+        </div>
+        <div class="status-container">
+            <div id="gesture-status" class="status">状态: 等待手势连接...</div>
+            <div id="ws-status" class="hardware-sync">🔗 硬件链路: 正在连接后端...</div>
+        </div>
+    </div>
+
+    <!-- 隐藏的原始视频输入 -->
+    <video id="input-video" playsinline></video>
+    <!-- 预览画布 -->
+    <canvas id="webcam-preview"></canvas>
+    <!-- 主3D场景容器 -->
+    <div id="canvas-container"></div>
+
+    <!-- 内联封装的 RobustCamera（已加入分辨率降级与轨道释放重试） -->
+    <script>
+        class Camera {
+            constructor(videoElement, options) {
+                this.video = videoElement;
+                this.onFrame = options.onFrame;
+                this.width = options.width || 640;
+                this.height = options.height || 480;
+                this.stream = null;
+                this.active = false;
+            }
+
+            async start() {
+                this.stop();
+                try {
+                    try {
+                        this.stream = await navigator.mediaDevices.getUserMedia({
+                            video: {
+                                width: { ideal: this.width },
+                                height: { ideal: this.height }
+                            }
+                        });
+                    } catch (err) {
+                        console.warn("指定分辨率打开失败，尝试默认参数...", err);
+                        this.stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                    }
+
+                    this.video.srcObject = this.stream;
+                    await this.video.play();
+                    this.active = true;
+                    this._videoLoop();
+                } catch (error) {
+                    this.stop();
+                    throw error;
+                }
+            }
+
+            async _videoLoop() {
+                while (this.active && this.video) {
+                    if (this.video.readyState >= 2) {
+                        await this.onFrame();
+                    }
+                    await new Promise(requestAnimationFrame);
+                }
+            }
+
+            stop() {
+                this.active = false;
+                if (this.stream) {
+                    this.stream.getTracks().forEach(track => track.stop());
+                    this.stream = null;
+                }
+                if (this.video) {
+                    this.video.srcObject = null;
+                }
+            }
+        }
+        window.Camera = Camera;
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+        // ==========================================
+        // 1. 全局配置与状态
+        // ==========================================
+        const CONFIG = {
+            particleCount: 8000,
+            ringParticleCount: 4000,
+            minDistance: 120,
+            maxDistance: 800,
+            defaultDistance: 300,
+            rotationSpeedMultiplier: 0.05
+        };
+
+        const COLOR_PALETTE = [
+            { name: "赛博橙 (Cyber Orange)", color: 0xff6600 },
+            { name: "冰川蓝 (Ice Blue)", color: 0x00ffff },
+            { name: "极客绿 (Matrix Green)", color: 0x00ff66 },
+            { name: "霓虹紫 (Neon Purple)", color: 0xff00ff }
+        ];
+        let currentColorIndex = 0;
+        let targetPlanetColor = new THREE.Color(COLOR_PALETTE[0].color);
+        let lastColorChangeTime = 0;
+
+        let scene, camera, renderer, composer;
+        let planetSystem, ringSystem1, ringSystem2;
+        let planetMat;
+        let time = 0;
+
+        window.isExploding = false;
+        window.explosionFactor = 0;
+        window.isResettingCamera = false;
+
+        const cameraState = {
+            radius: CONFIG.defaultDistance,
+            theta: Math.PI / 2,
+            phi: 0,
+            zoomVelocity: 0,
+            targetRadius: CONFIG.defaultDistance,
+            isFist: false,
+            isOpen: false,
+            handRotation: 0
+        };
+
+        const statusEl = document.getElementById('gesture-status');
+        const loadingEl = document.getElementById('loading');
+
+        // ==========================================
+        // 2. Three.js 初始化与场景构建
+        // ==========================================
+        function initThree() {
+            const container = document.getElementById('canvas-container');
+
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x000000, 0.0005);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 2000);
+            camera.position.set(0, 0, CONFIG.defaultDistance);
+
+            renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            container.appendChild(renderer.domElement);
+
+            const renderScene = new RenderPass(scene, camera);
+            const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+            bloomPass.threshold = 0;
+            bloomPass.strength = 2.0;
+            bloomPass.radius = 0.5;
+
+            composer = new EffectComposer(renderer);
+            composer.addPass(renderScene);
+            composer.addPass(bloomPass);
+
+            const particleTexture = createParticleTexture();
+
+            const planetGeo = new THREE.BufferGeometry();
+            const planetPos = [];
+            const planetSizes = [];
+
+            for (let i = 0; i < CONFIG.particleCount; i++) {
+                const u = Math.random();
+                const v = Math.random();
+                const theta = 2 * Math.PI * u;
+                const phi = Math.acos(2 * v - 1);
+                
+                let r = 50; 
+                if (Math.random() > 0.8) r = 50 * Math.random();
+
+                const x = r * Math.sin(phi) * Math.cos(theta);
+                const y = r * Math.sin(phi) * Math.sin(theta);
+                const z = r * Math.cos(phi);
+
+                planetPos.push(x, y, z);
+                planetSizes.push(Math.random() * 2 + 1);
+            }
+
+            planetGeo.setAttribute('position', new THREE.Float32BufferAttribute(planetPos, 3));
+            planetGeo.setAttribute('size', new THREE.Float32BufferAttribute(planetSizes, 1));
+            planetGeo.setAttribute('originalPosition', new THREE.Float32BufferAttribute(planetPos, 3));
+
+            planetMat = new THREE.PointsMaterial({
+                color: targetPlanetColor,
+                size: 3,
+                map: particleTexture,
+                transparent: true,
+                opacity: 0.9,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+
+            planetSystem = new THREE.Points(planetGeo, planetMat);
+            scene.add(planetSystem);
+
+            const createRing = (radiusInner, radiusOuter, count, tiltX, tiltZ) => {
+                const geo = new THREE.BufferGeometry();
+                const pos = [];
+                for(let i=0; i<count; i++) {
+                    const angle = Math.random() * Math.PI * 2;
+                    const r = THREE.MathUtils.lerp(radiusInner, radiusOuter, Math.random());
+                    const x = r * Math.cos(angle);
+                    const y = (Math.random() - 0.5) * 2;
+                    const z = r * Math.sin(angle);
+                    pos.push(x, y, z);
+                }
+                geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+                const mat = new THREE.PointsMaterial({
+                    color: 0xffffff,
+                    size: 2,
+                    map: particleTexture,
+                    transparent: true,
+                    opacity: 0.6,
+                    blending: THREE.AdditiveBlending,
+                    depthWrite: false
+                });
+                const sys = new THREE.Points(geo, mat);
+                sys.rotation.x = tiltX;
+                sys.rotation.z = tiltZ;
+                return sys;
+            };
+
+            ringSystem1 = createRing(70, 110, CONFIG.ringParticleCount, Math.PI / 3, Math.PI / 6);
+            ringSystem2 = createRing(80, 140, CONFIG.ringParticleCount, -Math.PI / 4, -Math.PI / 8);
+            
+            scene.add(ringSystem1);
+            scene.add(ringSystem2);
+
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function createParticleTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 32;
+            canvas.height = 32;
+            const context = canvas.getContext('2d');
+            const gradient = context.createRadialGradient(16, 16, 0, 16, 16, 16);
+            gradient.addColorStop(0, 'rgba(255,255,255,1)');
+            gradient.addColorStop(0.2, 'rgba(255,255,255,0.8)');
+            gradient.addColorStop(0.5, 'rgba(255,255,255,0.2)');
+            gradient.addColorStop(1, 'rgba(0,0,0,0)');
+            context.fillStyle = gradient;
+            context.fillRect(0, 0, 32, 32);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // ==========================================
+        // 3. 动画与逻辑更新循环
+        // ==========================================
+        function updateCamera() {
+            if (window.isResettingCamera) {
+                cameraState.radius = THREE.MathUtils.lerp(cameraState.radius, CONFIG.defaultDistance, 0.08);
+                cameraState.zoomVelocity = 0;
+                if (Math.abs(cameraState.radius - CONFIG.defaultDistance) < 1) {
+                    window.isResettingCamera = false;
+                }
+            } else {
+                if (Math.abs(cameraState.handRotation) > 0.1) {
+                    cameraState.phi += cameraState.handRotation * CONFIG.rotationSpeedMultiplier;
+                }
+
+                if (cameraState.isFist) {
+                    cameraState.zoomVelocity += 0.5; 
+                } else if (cameraState.isOpen) {
+                    const diff = cameraState.radius - CONFIG.minDistance;
+                    cameraState.zoomVelocity = -diff * 0.05;
+                } else {
+                    cameraState.zoomVelocity *= 0.9;
+                }
+
+                cameraState.radius += cameraState.zoomVelocity;
+
+                if (cameraState.radius < CONFIG.minDistance) {
+                    cameraState.radius = CONFIG.minDistance;
+                    cameraState.zoomVelocity = 0;
+                }
+                if (cameraState.radius > 2000) cameraState.radius = 2000;
+
+                if (!cameraState.isFist && !cameraState.isOpen && Math.abs(cameraState.handRotation) < 0.1 && !window.isExploding) {
+                   cameraState.phi -= 0.001;
+                }
+            }
+
+            camera.position.x = cameraState.radius * Math.sin(cameraState.theta) * Math.sin(cameraState.phi);
+            camera.position.y = cameraState.radius * Math.cos(cameraState.theta);
+            camera.position.z = cameraState.radius * Math.sin(cameraState.theta) * Math.cos(cameraState.phi);
+
+            camera.lookAt(0, 0, 0);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            time += 0.005;
+
+            if (planetMat) {
+                planetMat.color.lerp(targetPlanetColor, 0.05);
+            }
+
+            if (planetSystem) planetSystem.rotation.y = time * 0.1;
+            if (ringSystem1) ringSystem1.rotation.z -= 0.002;
+            if (ringSystem2) ringSystem2.rotation.z += 0.003;
+
+            if (planetSystem) {
+                const positions = planetSystem.geometry.attributes.position.array;
+                const originals = planetSystem.geometry.attributes.originalPosition.array;
+                
+                if (window.isExploding) {
+                    window.explosionFactor = THREE.MathUtils.lerp(window.explosionFactor || 0, 1.0, 0.08);
+                } else {
+                    window.explosionFactor = THREE.MathUtils.lerp(window.explosionFactor || 0, 0.0, 0.05);
+                }
+                
+                const factor = window.explosionFactor;
+                if (factor > 0.01 || window.isExploding) {
+                    for (let i = 0; i < positions.length; i += 3) {
+                        const ox = originals[i];
+                        const oy = originals[i+1];
+                        const oz = originals[i+2];
+                        
+                        const len = Math.sqrt(ox*ox + oy*oy + oz*oz);
+                        const dirX = ox / (len || 1);
+                        const dirY = oy / (len || 1);
+                        const dirZ = oz / (len || 1);
+                        
+                        const targetLen = len + factor * 220;
+                        positions[i]   = dirX * targetLen;
+                        positions[i+1] = dirY * targetLen;
+                        positions[i+2] = dirZ * targetLen;
+                    }
+                    planetSystem.geometry.attributes.position.needsUpdate = true;
+                }
+            }
+
+            updateCamera();
+            composer.render();
+        }
+
+        // ==========================================
+        // 4. MediaPipe 手势识别与多手势状态机
+        // ==========================================
+        const previewCanvas = document.getElementById('webcam-preview');
+        const previewCtx = previewCanvas.getContext('2d');
+        
+        const distSq = (p1, p2) => (p1.x - p2.x)**2 + (p1.y - p2.y)**2;
+
+        function sendGestureToHardware(action, payload = {}) {
+            if (wsInstance && wsInstance.readyState === WebSocket.OPEN) {
+                wsInstance.send(JSON.stringify({ action, payload }));
+            }
+        }
+
+        function onResults(results) {
+            previewCtx.save();
+            previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+            previewCtx.drawImage(results.image, 0, 0, previewCanvas.width, previewCanvas.height);
+            
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+                
+                drawConnectors(previewCtx, landmarks, HAND_CONNECTIONS, {color: '#00ffcc', lineWidth: 2});
+                drawLandmarks(previewCtx, landmarks, {color: '#ffaa00', lineWidth: 1, radius: 2});
+
+                const wrist = landmarks[0];
+                const middleBase = landmarks[9];
+                
+                const dx = middleBase.x - wrist.x;
+                cameraState.handRotation = dx * -5.0;
+
+                const distThumbIndex = Math.hypot(landmarks[4].x - landmarks[8].x, landmarks[4].y - landmarks[8].y);
+                const thumbTipY = landmarks[4].y;
+                const thumbMcpY = landmarks[2].y;
+                const isThumbUp = (thumbTipY < thumbMcpY - 0.05);
+
+                const dTip = (t, w) => distSq(landmarks[t], landmarks[w]);
+                const indexExtended = dTip(8, 0) > dTip(5, 0) * 1.3;
+                const middleExtended = dTip(12, 0) > dTip(9, 0) * 1.3;
+                const ringFolded = dTip(16, 0) < dTip(13, 0) * 1.2;
+                const pinkyFolded = dTip(20, 0) < dTip(17, 0) * 1.2;
+                const isVictory = indexExtended && middleExtended && ringFolded && pinkyFolded;
+
+                const fingerTips = [8, 12, 16, 20];
+                const fingerMCPs = [5, 9, 13, 17];
+                let foldedCount = 0;
+                for (let i = 0; i < 4; i++) {
+                    if (dTip(fingerTips[i], 0) < dTip(fingerMCPs[i], 0) * 1.2) {
+                        foldedCount++;
+                    }
+                }
+
+                if (distThumbIndex < 0.045) {
+                    window.isExploding = true;
+                    window.isResettingCamera = false;
+                    cameraState.isFist = false;
+                    cameraState.isOpen = false;
+                    statusEl.innerText = "状态: 👌 OK (超新星大爆炸)";
+                    statusEl.style.color = "#ffcc00";
+                    sendGestureToHardware("EXPLODE");
+                } 
+                else if (isVictory) {
+                    window.isExploding = false;
+                    window.isResettingCamera = false;
+                    cameraState.isFist = false;
+                    cameraState.isOpen = false;
+
+                    const now = Date.now();
+                    if (now - lastColorChangeTime > 1200) {
+                        currentColorIndex = (currentColorIndex + 1) % COLOR_PALETTE.length;
+                        targetPlanetColor.set(COLOR_PALETTE[currentColorIndex].color);
+                        lastColorChangeTime = now;
+                        sendGestureToHardware("CHANGE_COLOR", { color: COLOR_PALETTE[currentColorIndex].name });
+                    }
+                    statusEl.innerText = `状态: ✌️ 剪刀手 (${COLOR_PALETTE[currentColorIndex].name})`;
+                    statusEl.style.color = "#00ffff";
+                }
+                else if (isThumbUp && foldedCount >= 2) {
+                    window.isExploding = false;
+                    window.isResettingCamera = true;
+                    cameraState.isFist = false;
+                    cameraState.isOpen = false;
+                    statusEl.innerText = "状态: 👍 点赞 (视角已重置)";
+                    statusEl.style.color = "#00ff66";
+                    sendGestureToHardware("RESET");
+                }
+                else if (foldedCount >= 3) {
+                    window.isExploding = false;
+                    window.isResettingCamera = false;
+                    cameraState.isFist = true;
+                    cameraState.isOpen = false;
+                    statusEl.innerText = "状态: ✊ 握拳 (相机拉远)";
+                    statusEl.style.color = "#ff4444";
+                    sendGestureToHardware("ZOOM_OUT");
+                } 
+                else if (foldedCount === 0) {
+                    window.isExploding = false;
+                    window.isResettingCamera = false;
+                    cameraState.isFist = false;
+                    cameraState.isOpen = true;
+                    statusEl.innerText = "状态: ✋ 张开 (相机靠近)";
+                    statusEl.style.color = "#44ff44";
+                    sendGestureToHardware("ZOOM_IN");
+                } 
+                else {
+                    window.isExploding = false;
+                    window.isResettingCamera = false;
+                    cameraState.isFist = false;
+                    cameraState.isOpen = false;
+                    statusEl.innerText = "状态: 🔄 斜手转腕 (视角环绕中)";
+                    statusEl.style.color = "#00ffcc";
+                    sendGestureToHardware("ROTATE", { handRotation: cameraState.handRotation });
+                }
+
+            } else {
+                window.isExploding = false;
+                window.isResettingCamera = false;
+                cameraState.handRotation = 0;
+                cameraState.isFist = false;
+                cameraState.isOpen = false;
+                statusEl.innerText = "状态: 未检测到有效手势";
+                statusEl.style.color = "#888";
+            }
+            previewCtx.restore();
+        }
+
+        function initMediaPipe() {
+            const videoElement = document.getElementById('input-video');
+
+            const hands = new window.Hands({locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+            }});
+
+            hands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+
+            hands.onResults(onResults);
+
+            const cameraUtils = new window.Camera(videoElement, {
+                onFrame: async () => {
+                    await hands.send({image: videoElement});
+                },
+                width: 640,
+                height: 480
+            });
+            
+            cameraUtils.start()
+                .then(() => {
+                    loadingEl.style.display = 'none';
+                })
+                .catch(err => {
+                    console.error("摄像头启动失败:", err);
+                    loadingEl.innerHTML = `
+                        <span style="color: #ff4444; font-size: 17px; font-weight: bold;">⚠️ 摄像头启动失败</span><br><br>
+                        <span style="font-size: 13px; opacity: 0.9; line-height: 1.6; text-align: left; display: block;">
+                        <b>错误类型：</b> ${err.name || 'UnknownError'}<br>
+                        <b>可能原因：</b><br>
+                        1. 摄像头正被其他软件占用（如 <b>微信视频、Zoom、腾讯会议、OBS</b> 或其他浏览器的网页标签）。<br>
+                        2. 浏览器未授予摄像头权限。<br><br>
+                        <b>处理方法：</b>请关闭占用摄像头的软件，检查浏览器地址栏权限，然后刷新页面重试！
+                        </span>
+                    `;
+                });
+            
+            previewCanvas.width = 160;
+            previewCanvas.height = 120;
+        }
+
+        // ==========================================
+        // 5. WebSocket 硬件端通信接口
+        // ==========================================
+        let wsInstance = null;
+        function initWebSocket() {
+            const wsStatusEl = document.getElementById('ws-status');
+            wsStatusEl.innerText = "🔗 硬件链路: 正在连接后端 ws://localhost:8765 ...";
+            wsStatusEl.style.color = "#ffaa00";
+
+            try {
+                wsInstance = new WebSocket('ws://localhost:8765');
+                
+                wsInstance.onopen = () => {
+                    wsStatusEl.innerText = "🔗 硬件链路: 已成功连接树莓派 / 后端服务 (WebSocket)";
+                    wsStatusEl.style.color = "#00ffcc";
+                    console.log("[WebSocket] 链接成功建立。");
+                };
+                
+                wsInstance.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        console.log("收到后端硬件响应:", data);
+                    } catch (e) {
+                        console.log("收到后端消息:", event.data);
+                    }
+                };
+
+                wsInstance.onerror = (error) => {
+                    console.warn("[WebSocket] 连接遇到错误或拒绝连接。");
+                };
+
+                wsInstance.onclose = (event) => {
+                    wsStatusEl.innerText = "🔗 硬件链路: WebSocket 未连接 (当前为本地独立模拟模式)";
+                    wsStatusEl.style.color = "#ffaa00";
+                    console.log(`[WebSocket] 链接关闭 (code: ${event.code})。`);
+                };
+            } catch (e) {
+                wsStatusEl.innerText = "🔗 硬件链路: WebSocket 初始化异常 (本地独立模拟)";
+                wsStatusEl.style.color = "#ff4444";
+                console.error("WebSocket 初始化失败:", e);
+            }
+        }
+
+        // ==========================================
+        // 启动主程序
+        // ==========================================
+        initThree();
+        animate();
+        setTimeout(initMediaPipe, 1000);
+        initWebSocket();
+
+    </script>
+</body>
+</html>
